@@ -100,6 +100,9 @@ ORS_API_KEY=your_openrouteservice_api_key
 MAPBOX_API_KEY=your_mapbox_api_key
 ```
 
+Don't forget to uncomment ```get_lat_lon_from_address```function!
+
+
 ---
 
 ## **6️⃣ Next Steps**  
