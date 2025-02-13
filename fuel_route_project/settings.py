@@ -136,3 +136,5 @@ load_dotenv()
 
 # ORS API key'ini almak
 ORS_API_KEY = os.getenv('ORS_API_KEY')
+
+MAPBOX_API_KEY = os.getenv('MAPBOX_API_KEY')
