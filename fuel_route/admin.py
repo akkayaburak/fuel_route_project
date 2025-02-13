@@ -1,4 +1,5 @@
 from django.contrib import admin
-from .models import FuelStop
+from .models import FuelStation, Route
 
-admin.site.register(FuelStop)
+admin.site.register(FuelStation)
+admin.site.register(Route)
