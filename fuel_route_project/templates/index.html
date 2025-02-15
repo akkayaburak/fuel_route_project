@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fuel Optimization Route</title>
+
+    <!-- Load Mapbox library for interactive maps -->
+    <script src="https://api.mapbox.com/mapbox-gl-js/v2.8.1/mapbox-gl.js"></script>
+    <link href="https://api.mapbox.com/mapbox-gl-js/v2.8.1/mapbox-gl.css" rel="stylesheet" />
+
+    <style>
+        /* General page styling */
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+        }
+
+        /* Map container styling */
+        #map {
+            width: 100%;
+            height: 80vh;
+        }
+
+        /* Input controls section */
+        .controls {
+            padding: 10px;
+            background: white;
+            text-align: center;
+        }
+
+        /* Styling for input fields and buttons */
+        input,
+        button {
+            margin: 5px;
+            padding: 8px;
+            font-size: 16px;
+        }
+    </style>
+</head>
+
+<body>
+    <!-- Control panel for user input -->
+    <div class="controls">
+        <label>Start Location (lat, lon):</label>
+        <input type="text" id="start_lat" value="40.712776">
+        <input type="text" id="start_lon" value="-74.005974">
+        <br>
+        <label>End Location (lat, lon):</label>
+        <input type="text" id="end_lat" value="30.2672">
+        <input type="text" id="end_lon" value="-97.7431">
+        <br>
+        <button onclick="calculateRoute()">Find Route</button>
+    </div>
+
+    <!-- Map container -->
+    <div id="map"></div>
+
+    <script>
+        // Set Mapbox API key (injected from the backend)
+        mapboxgl.accessToken = "{{ mapbox_api_key }}";
+
+        // Initialize the Mapbox map
+        const map = new mapboxgl.Map({
+            container: 'map', // The ID of the HTML element
+            style: 'mapbox://styles/mapbox/streets-v11', // Map style
+            center: [-75, 40], // Initial map center (longitude, latitude)
+            zoom: 5 // Initial zoom level
+        });
+
+        const stationMarkers = []; // Stores markers for fuel stations
+
+        /**
+         * Adds fuel stations as markers on the map.
+         * Clears existing markers before adding new ones.
+         */
+        function addFuelStationsToMap(stations) {
+            // **Remove previous markers**
+            stationMarkers.forEach(marker => marker.remove());
+            stationMarkers.length = 0; // Reset the array
+
+            // **Add new markers for each fuel station**
+            stations.forEach(station => {
+                const marker = new mapboxgl.Marker({ color: 'blue' })
+                    .setLngLat(station.geometry.coordinates)
+                    .setPopup(new mapboxgl.Popup().setText(`${station.properties.name} - $${station.properties.price}`))
+                    .addTo(map);
+
+                stationMarkers.push(marker); // Store the marker reference
+            });
+        }
+
+        /**
+         * Fetches the optimized fuel route from the API.
+         * Parses user input, sends a request, and updates the map.
+         */
+        function calculateRoute() {
+            const start_lat = document.getElementById('start_lat').value;
+            const start_lon = document.getElementById('start_lon').value;
+            const end_lat = document.getElementById('end_lat').value;
+            const end_lon = document.getElementById('end_lon').value;
+
+            // **Ensure valid input values**
+            if (!start_lat || !start_lon || !end_lat || !end_lon) {
+                alert("Please enter valid coordinates.");
+                return;
+            }
+
+            // **Send API request to fetch the route**
+            fetch('http://127.0.0.1:8000/fuel/api/calculate-route/', {
+                method: 'POST',
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    "start_lat": parseFloat(start_lat),
+                    "start_lon": parseFloat(start_lon),
+                    "end_lat": parseFloat(end_lat),
+                    "end_lon": parseFloat(end_lon)
+                })
+            })
+                .then(response => response.json()) // Convert response to JSON
+                .then(data => {
+                    console.log("🔥 API Response:", data);
+
+                    // **Handle API errors**
+                    if (data.error) {
+                        alert("Error: " + data.error);
+                        return;
+                    }
+
+                    // **Ensure the response contains route data**
+                    if (!data.features || data.features.length === 0) {
+                        console.error("Error: No features found in API response!");
+                        alert("No features found in API response!");
+                        return;
+                    }
+
+                    let routeFeature = null;
+                    let stationFeatures = [];
+
+                    // **Separate route and station data**
+                    data.features.forEach(feature => {
+                        if (feature.geometry.type === "LineString") {
+                            routeFeature = feature; // Route path
+                        } else if (feature.geometry.type === "Point") {
+                            stationFeatures.push(feature); // Fuel stations
+                        }
+                    });
+
+                    if (!routeFeature) {
+                        console.error("Error: Route data is missing in API response!");
+                        alert("Route data is missing in API response!");
+                        return;
+                    }
+
+                    // **Draw route on the map** 🛣️
+                    const routeGeoJson = {
+                        type: "FeatureCollection",
+                        features: [routeFeature]
+                    };
+
+                    if (map.getSource('route')) {
+                        map.getSource('route').setData(routeGeoJson);
+                    } else {
+                        map.addSource('route', { type: 'geojson', data: routeGeoJson });
+                        map.addLayer({
+                            id: 'route-layer',
+                            type: 'line',
+                            source: 'route',
+                            layout: { 'line-join': 'round', 'line-cap': 'round' },
+                            paint: { 'line-color': '#ff0000', 'line-width': 5 }
+                        });
+                    }
+
+                    // **Add fuel station markers**
+                    addFuelStationsToMap(stationFeatures);
+
+                    // **Adjust the map view to fit the entire route**
+                    const bounds = new mapboxgl.LngLatBounds();
+                    routeFeature.geometry.coordinates.forEach(coord => bounds.extend(coord));
+                    map.fitBounds(bounds, { padding: 50 });
+                })
+                .catch(error => console.error('Error fetching route:', error));
+        }
+
+        /**
+         * Converts a polyline to a GeoJSON format.
+         * Used to draw the route on the map.
+         */
+        function polylineToGeoJson(encodedPolyline) {
+            const polylineDecoded = decodePolyline(encodedPolyline);
+            return {
+                type: 'Feature',
+                properties: {},
+                geometry: {
+                    type: 'LineString',
+                    coordinates: polylineDecoded.map(coord => [coord[1], coord[0]]) // Convert lat/lon format
+                }
+            };
+        }
+
+        /**
+         * Decodes a Google Maps encoded polyline string into an array of coordinates.
+         * Used for drawing the route on the map.
+         */
+        function decodePolyline(str, precision = 5) {
+            let index = 0, lat = 0, lon = 0, coordinates = [], shift, result;
+            while (index < str.length) {
+                shift = result = 0;
+                do { result |= (str.charCodeAt(index++) - 63) << shift; shift += 5; } while (result >= 0x20);
+                lat += (result & 1 ? ~(result >> 1) : (result >> 1));
+                shift = result = 0;
+                do { result |= (str.charCodeAt(index++) - 63) << shift; shift += 5; } while (result >= 0x20);
+                lon += (result & 1 ? ~(result >> 1) : (result >> 1));
+                coordinates.push([lat / 1e5, lon / 1e5]);
+            }
+            return coordinates;
+        }
+    </script>
+</body>
+
+</html>

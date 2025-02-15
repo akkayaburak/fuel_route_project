@@ -57,7 +57,7 @@ ROOT_URLCONF = 'fuel_route_project.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [os.path.join(BASE_DIR, "fuel_route_project", "templates")],  # Buraya templates ekledik!
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [

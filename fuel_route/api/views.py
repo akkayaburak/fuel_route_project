@@ -53,11 +53,7 @@ def calculate_route(request):
         # If the total route distance is within one tank (500 miles), no fuel stops needed
         if total_distance_miles <= max_range:
             total_cost = calculate_fuel_cost(route_data, 3.50)  # Assuming $3.50 per gallon
-            return JsonResponse({
-                "route": route_data,
-                "optimal_fuel_stations": [],  # No fuel stops needed
-                "total_fuel_cost": total_cost
-            })
+            return format_geojson_response(route_data, [], total_cost)
         
         # Fetch available fuel stations from the database
         fuel_stations = list(FuelStation.objects.all().values())
@@ -70,66 +66,169 @@ def calculate_route(request):
         # Compute the total fuel cost
         total_cost = calculate_fuel_cost(route_data, 3.50) 
         
-        return JsonResponse({
-            "route": route_data,
-            "optimal_fuel_stations": optimal_stations,
-            "total_fuel_cost": total_cost
-        })
+        return format_geojson_response(route_data, optimal_stations, total_cost)
     else:
         return JsonResponse({"error": "Error fetching route data from ORS"}, status=500)
 
 
-def get_optimal_fuel_stations(route_data, fuel_stations, max_range=500):
+def format_geojson_response(route_data, optimal_stations, total_cost):
     """
-    Determines the optimal fuel stations along the route. The vehicle has a maximum range of `max_range` miles,
-    so stops are determined based on:
-      - Proximity to the route (within 5 miles)
-      - The best fuel price at each necessary stop
-      - Ensuring stops are made before running out of fuel
-    """
-    optimal_stations = []
-    route_geometry = route_data.get('routes', [{}])[0].get('geometry')
+    Converts the route data and fuel stations into a GeoJSON response for easy map rendering.
     
+    Parameters:
+    - route_data: The route JSON from ORS
+    - optimal_stations: The list of optimal fuel stations
+    - total_cost: The total fuel cost for the journey
+    
+    Returns:
+    - A JsonResponse with GeoJSON formatted route and stations
+    """
+
+    # Convert route geometry to GeoJSON format
+    route_geometry = polyline.decode(route_data['routes'][0]['geometry'])
+    geojson_route = {
+        "type": "Feature",
+        "geometry": {
+            "type": "LineString",
+            "coordinates": [[lon, lat] for lat, lon in route_geometry]
+        },
+        "properties": {
+            "total_fuel_cost": total_cost
+        }
+    }
+
+    # Convert fuel stations to GeoJSON format (with safety checks)
+    geojson_stations = [
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "Point",
+                "coordinates": [station["lon"], station["lat"]]
+            },
+            "properties": {
+                "name": station.get("name", "Unknown"),
+                "price": station.get("price", "Unknown"),
+                "address": station.get("address", "Unknown"),
+                "city": station.get("city", "Unknown"),
+                "state": station.get("state", "Unknown")
+            }
+        }
+        for station in optimal_stations
+    ]
+
+    # Final GeoJSON response
+    geojson_response = {
+        "type": "FeatureCollection",
+        "features": [geojson_route] + geojson_stations
+    }
+
+    return JsonResponse(geojson_response, safe=False)
+
+
+def get_optimal_fuel_stations(route_data, fuel_stations, max_range=500, min_range=300):
+    """
+    Finds the most cost-effective fuel stations along a route.
+    - Prioritizes the cheapest fuel stations within a given distance.
+    - Scans through route waypoints to find fuel stations close to the route.
+    - If no fuel station is found within 500 miles, it decreases the range to 300 miles.
+    
+    Parameters:
+        route_data: (dict) Route information (from OpenRouteService or similar API)
+        fuel_stations: (list) List of available fuel stations
+        max_range: (int) Maximum fuel range before refueling (default: 500 miles)
+        min_range: (int) Minimum distance between refueling stops (default: 300 miles)
+        
+    Returns:
+        optimal_stations (list): The best fuel stations along the route
+    """
+    optimal_stations = []  # Stores the selected fuel stops
+    
+    # **1️⃣ Extract route geometry**
+    route_geometry = route_data.get('routes', [{}])[0].get('geometry')
     if not route_geometry:
-        print("Error: Route geometry not found!")
+        print("❌ Error: Route geometry not found!")
         return []
 
-    decoded_route = polyline.decode(route_geometry)  # Decode polyline to get (lat, lon) points
+    # **2️⃣ Decode the route and calculate total distance**
+    decoded_route = polyline.decode(route_geometry)  # Get all waypoints in the route
     total_distance_miles = route_data.get('routes', [{}])[0].get('summary', {}).get('distance', 0) / 1609.34  
     if total_distance_miles == 0:
-        print("Error: Route distance not found!")
+        print("❌ Error: Route distance not found!")
         return []
 
-    current_mileage = 0  # Track the vehicle's mileage along the route
+    current_mileage = 0  # Tracks the vehicle's current mileage
+    previous_station = None  # Keeps track of the last fuel stop
+
+    # **3️⃣ Extract the starting point**
+    start_lat, start_lon = decoded_route[0]
 
     while current_mileage < total_distance_miles:
+        # **4️⃣ Define the next stop range for refueling**
         next_stop_mileage = min(current_mileage + max_range, total_distance_miles)
-        candidate_stations = []
+        candidate_stations = []  # Stores fuel stations within the current range
+        seen_stations = {}  # Keeps track of the cheapest station per location
 
+        print(f"\n🚗 Checking fuel stations between {current_mileage}-{next_stop_mileage} miles")
+
+        # **5️⃣ Iterate through all fuel stations**
         for station in fuel_stations:
             station_lat = station.get('lat')
             station_lon = station.get('lon')
-            station_price = station.get('price')
+            station_price = float(station.get('price', 0))
 
+            # 🚨 **Conditions:**
+            # - Skip stations with missing latitude/longitude
+            # - Ignore stations too close to the starting point (<50 miles)
             if station_lat is None or station_lon is None or station_price is None:
-                continue  # Skip stations with missing data
+                continue
 
-            for i in range(int(current_mileage), int(next_stop_mileage), 10):  # Check every 10 miles
+            if haversine(start_lat, start_lon, station_lat, station_lon) < 50:
+                continue
+
+            station_key = (station_lat, station_lon)
+            if station_key in seen_stations:
+                # **Keep the cheapest station for each location**
+                if station_price < seen_stations[station_key]['price']:
+                    seen_stations[station_key] = station
+            else:
+                seen_stations[station_key] = station
+
+        # **6️⃣ Check for stations near the route**
+        for station in seen_stations.values():
+            for i in range(int(current_mileage), int(next_stop_mileage), 10):  # Scan every 10 miles along the route
                 if i < len(decoded_route):
                     route_point = decoded_route[i]
-                    station_distance = haversine(route_point[0], route_point[1], station_lat, station_lon)
-                    
-                    if station_distance is not None and station_distance <= 5:  # Check proximity
+                    station_distance = haversine(route_point[0], route_point[1], station["lat"], station["lon"])
+
+                    # **Add station if it's within 5 miles of the route**
+                    if station_distance is not None and station_distance <= 5:
                         candidate_stations.append(station)
 
+        # **7️⃣ Select the best fuel station**
         if candidate_stations:
-            best_station = min(candidate_stations, key=lambda x: x['price'])  # Pick the cheapest
+            # ✅ **Pick the cheapest station**
+            best_station = min(candidate_stations, key=lambda x: x['price'])
+
+            # 🚨 **Skip station if it's too close to the previous stop**
+            if previous_station:
+                distance_between = haversine(previous_station['lat'], previous_station['lon'], best_station['lat'], best_station['lon'])
+                if distance_between < min_range:
+                    print(f"❌ Skipping {best_station['name']} (Too close to previous station)")
+                    current_mileage += 100
+                    continue
+
+            print(f"✅ Fuel stop: {best_station['name']} at {best_station['lat']}, {best_station['lon']} - Price: ${best_station['price']}")
             optimal_stations.append(best_station)
-            current_mileage = next_stop_mileage  # Move to the next range
+            previous_station = best_station  # Update the last refueling station
+            current_mileage = next_stop_mileage  # Continue from the refueling point
+
         else:
-            current_mileage += 50  # Move forward and retry
+            # **If no station is found, reduce the distance and retry**
+            print(f"⚠️ No suitable fuel station found in range {current_mileage}-{next_stop_mileage} miles")
+            current_mileage += 100  # Increase mileage by 100 miles and retry
 
     return optimal_stations
+
 
 
 def haversine(lat1, lon1, lat2, lon2):
